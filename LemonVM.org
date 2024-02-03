@@ -1,0 +1,947 @@
+#+TITLE: LemonVM - a simple, dynamic typed Bytecode VM
+#+AUTHOR: Thomas Alexgaard
+#+STARTUP: showeverything
+#+OPTIONS: toc:3
+
+* Table of Contents :toc:
+- [[#license][License]]
+- [[#introduction][Introduction]]
+  - [[#why-create-lemonvm][Why create LemonVM]]
+  - [[#code-design-choice][Code Design Choice]]
+  - [[#ast-alternative][AST Alternative]]
+  - [[#instruction-set-design][Instruction Set Design]]
+  - [[#type-safety][Type Safety]]
+  - [[#c-function-interfacing-not-explored-yet][C Function Interfacing (not explored yet)]]
+  - [[#multithreading-not-explored-yet][Multithreading (not explored yet)]]
+- [[#refrences--resources][Refrences & Resources]]
+  - [[#vm-examples][VM Examples]]
+  - [[#bytecode-examples][Bytecode Examples]]
+- [[#lemonvm-include-target][LemonVM Include Target]]
+- [[#standard-library-defs][Standard Library Defs]]
+- [[#instruction-set][Instruction Set]]
+  - [[#instruction-opcode-definitions][Instruction Opcode Definitions]]
+  - [[#instruction-definition][Instruction Definition]]
+- [[#lexing-and-tokenization][Lexing and Tokenization]]
+  - [[#token-definition][Token Definition]]
+  - [[#token-extraction][Token Extraction]]
+- [[#evaluation][Evaluation]]
+  - [[#typedefs][Typedefs]]
+  - [[#vm-state--context][VM State & Context]]
+  - [[#evaluation-of-bytecode][Evaluation of bytecode]]
+  - [[#instruction-set-evaluation][Instruction Set Evaluation]]
+  - [[#label-extraction][Label Extraction]]
+  - [[#full-evaluation-of-a-program][Full Evaluation of a Program]]
+  - [[#file-reading][File Reading]]
+- [[#binary-compilation][Binary Compilation]]
+  - [[#the-expected-binary-format][The expected binary format]]
+
+* License
+
+Copyright (c) 2024 Thomas Alexgaard (github.com/thom9258/)
+
+This software is provided 'as-is', without any express or implied
+warranty. In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+   
+For more information, see [[https://en.wikipedia.org/wiki/Zlib_License][Zlib License]].
+
+* Introduction
+
+** Why create LemonVM
+
+LemonVM is written in order to explore a lot of different things.
+LemonVM tries to be a low level languange, that is essencially an easy bytecode target for higher-level and more verbose languanges.
+
+** Code Design Choice
+
+The code is implemented in a C style C++, where C++ features are only used if they are deemed really useful.
+This is also a type of experiment in writing modern C++ in a data oriented pattern, instead of Object Oriented.
+
+** AST Alternative
+
+First of all, LemonVM is an exploration of bytecode compilation & evaluation as an alternative to just doing AST crawling.
+The proposed benefit of this intermediate languange is first of all evaluation speed.
+
+** Instruction Set Design
+
+LemonVM tries to create a consise & simple to understand instruction set that makes it easy to compile to.
+
+** Type Safety
+
+LemonVM explores a low level bytecode structure while also using a high level dynamically-typed data. wether or not this is a good idea remains to be determined.
+
+** C Function Interfacing (not explored yet)
+
+LemonVM is used as a testbed for interfacing with C functions. The ideal goal of this system is to easily be able to runtime-link into known C interfaces with minimal problems.
+
+** Multithreading (not explored yet)
+
+* Refrences & Resources
+
+** VM Examples
+
+https://www.jmeiners.com/lc3-vm/#-lc3.c-block-11
+https://www.bartoszsypytkowski.com/simple-virtual-machine/
+https://dev.to/jimsy/building-a-stack-based-virtual-machine-part-4---code-3lmi
+https://www.infoworld.com/article/2077233/bytecode-basics.html
+
+
+Seperate type stack:
+https://www.reddit.com/r/ProgrammingLanguages/comments/10tmxt8/how_are_value_types_implemented_in_vms/
+
+** Bytecode Examples
+
+[[https://sharplab.io/#v2:C4LghgzgtgPgAgJgIwFgBQcDMACR2DC2A3utmbjgCJjACmAKgJZS1kCyAFNXUy9gCY1aASmKlyEgG5gATgKEJsAXnl0AdAEF+/AJq1ZEDkmEBucRLJwA7KtoIzaCQF90ToA=][C# bytecode]]
+[[http://www.ctoassembly.com/][C bytecode]]
+[[https://blog.jamesdbloom.com/JavaCodeToByteCode_PartOne.html][Java bytecode]]
+
+* LemonVM Include Target
+
+This file is what you should include if you want to access the library. 
+#+begin_src c++ :mkdirp yes :tangle LemonVM.hpp
+#pragma once
+
+#include "src/Defs.hpp"
+#include "src/InstructionSet.hpp"
+#include "src/Lexer.hpp"
+#include "src/Eval.hpp"
+#+end_src
+
+* Standard Library Defs
+
+#+begin_src c++ :mkdirp yes :mkdirp yes :tangle src/Defs.hpp
+#pragma once
+
+#include <cassert>
+#include <iostream>
+#include <sstream>
+#include <fstream>
+#include <streambuf>
+#include <string>
+#include <vector>
+#include <array>
+#include <map>
+#+end_src
+
+* Instruction Set
+
+#+begin_src c++ :mkdirp yes :tangle src/InstructionSet.hpp
+#pragma once
+
+#include "Defs.hpp"
+
+namespace LemonVM {
+#+end_src
+
+
+** Instruction Opcode Definitions
+
+First of all, the bytecode interface needs to be determined. This is done using a opcode instruction identifier.
+These are specified to have a memory size of a single byte.
+A in-debth explanation of all opcodes and their correponding evaluation is explained later.
+
+#+begin_src c++ :mkdirp yes :tangle src/InstructionSet.hpp
+enum Opcode : std::uint8_t {
+    OPCODE_INVALID = 00,
+    OPCODE_EXIT    = 01,
+    OPCODE_NOP     = 02,
+    OPCODE_PUT     = 03,
+    OPCODE_POP     = 04,
+    OPCODE_DUP     = 05,
+    OPCODE_DUPLAST = 06,
+    OPCODE_SWAP    = 07,
+
+    OPCODE_LABEL  = 20,
+    //OPCODE_JMP,
+    OPCODE_JMPIF  = 21,
+    OPCODE_CALL   = 22,
+    OPCODE_RETURN = 23,
+
+    OPCODE_PLUS     = 30,
+    OPCODE_MINUS    = 31,
+    OPCODE_MULTIPLY = 32,
+    OPCODE_DIVIDE   = 33,
+
+    OPCODE_VAR   = 40,
+    OPCODE_LOAD  = 41,
+    OPCODE_STORE = 42,
+
+    OPCODE_CMP = 50,
+    OPCODE_EQ  = 51,
+    //OPCODE_IF,
+    OPCODE_WRITE = 60,
+
+    OPCODE_COUNT
+};
+#+end_src
+
+** Instruction Definition
+
+We need some datastructures so that we can easily define both data and instruction.
+
+First of all, the data used in our VM is just defined as a integer, this is because i have not decided if the data used should be some kind of tagged union, or some more exotic method like [[https://leonardschuetz.ch/blog/nan-boxing/][NaN Boxing]].
+
+Secondly, we have a formal definition of a Instruction, due to the strange way the data is currently designed, labels needed to be a seperate variable.
+This method is entirely memory wasteful, as no operation can make use of both a argument and a label at the same time.
+Once a method for having different argument types has been chosen, the label will be integrated as just being a string argument.
+
+#+begin_src c++ :mkdirp yes :tangle src/InstructionSet.hpp
+using Arg = int;
+
+struct Instruction {
+    Opcode opcode{OPCODE_NOP};
+    Arg arg1{0};
+    std::string label{};
+};
+using InstructionSet = std::vector<Instruction>;
+#+end_src
+
+*** Instruction Creation
+
+In order to test out our instructions and their evaluation, we create some helper functions for these.
+This is entirely irrelevant for the VM as they are only used in testing.
+
+#+begin_src c++ :mkdirp yes :tangle src/InstructionSet.hpp
+inline const Instruction ins_new(Opcode op)                     { return {op, 0, ""}; }
+inline const Instruction ins_new(Opcode op, Arg arg)            { return {op, arg, ""}; }
+inline const Instruction ins_new(Opcode op, std::string label)  { return {op, 0, label}; }
+
+inline Instruction ins_exit()        { return ins_new(OPCODE_EXIT); }
+inline Instruction ins_nop()         { return ins_new(OPCODE_NOP); }
+inline Instruction ins_swap()        { return ins_new(OPCODE_SWAP); }
+inline Instruction ins_pop()         { return ins_new(OPCODE_POP); }
+inline Instruction ins_put(Arg arg1) { return ins_new(OPCODE_PUT, arg1); }
+inline Instruction ins_dup(Arg arg1) { return ins_new(OPCODE_DUP, arg1); }
+inline Instruction ins_duplast()     { return ins_new(OPCODE_DUPLAST); }
+inline Instruction ins_eq()          { return ins_new(OPCODE_EQ); }
+inline Instruction ins_cmp()         { return ins_new(OPCODE_CMP); }
+inline Instruction ins_write()       { return ins_new(OPCODE_WRITE); }
+inline Instruction ins_plus()        { return ins_new(OPCODE_PLUS); }
+inline Instruction ins_minus()       { return ins_new(OPCODE_MINUS); }
+inline Instruction ins_multiply()    { return ins_new(OPCODE_MULTIPLY); }
+inline Instruction ins_divide()      { return ins_new(OPCODE_DIVIDE); }
+
+inline Instruction ins_label(std::string label) { return ins_new(OPCODE_LABEL, label); }
+inline Instruction ins_jmpif(std::string label) { return ins_new(OPCODE_JMPIF, label); }
+inline Instruction ins_call(std::string label)  { return ins_new(OPCODE_CALL, label); }
+inline Instruction ins_return()                 { return ins_new(OPCODE_RETURN); }
+
+inline Instruction ins_var(std::string name)   { return ins_new(OPCODE_VAR, name); }
+inline Instruction ins_load(std::string name)  { return ins_new(OPCODE_LOAD, name); }
+inline Instruction ins_store(std::string name) { return ins_new(OPCODE_STORE, name); }
+#+end_src
+
+*** Instruction Stringification / Dissasembly
+
+In order to visualize a InstructionSet, we create a stringification function. This fuction is
+also able to be used for binaries and effectively dissasemble the binary program back to something
+that resembles source code.
+#+begin_src c++ :mkdirp yes :tangle src/InstructionSet.hpp
+static const std::string
+str(const Instruction& ins)
+{
+    switch (ins.opcode) {
+    case OPCODE_EXIT:     return "exit";
+    case OPCODE_NOP:      return "nop";
+    case OPCODE_SWAP:     return "swap";
+    case OPCODE_POP:      return "pop";
+    case OPCODE_PUT:      return "put " + std::to_string(ins.arg1);
+    case OPCODE_PLUS:     return "plus";
+    case OPCODE_MINUS:    return "minus";
+    case OPCODE_MULTIPLY: return "multiply";
+    case OPCODE_DIVIDE:   return "divide";
+    case OPCODE_DUP:      return "dup";
+    case OPCODE_DUPLAST:  return "duplast";
+    case OPCODE_WRITE:    return "write";
+    case OPCODE_EQ:       return "eq";
+    case OPCODE_CMP:      return "cmp";
+    case OPCODE_LABEL:    return "label " + ins.label;
+    case OPCODE_JMPIF:    return "jmpif " + ins.label;
+    case OPCODE_CALL:     return "call "  + ins.label;
+    case OPCODE_RETURN:   return "return";
+    case OPCODE_VAR:      return "var"   + ins.label;
+    case OPCODE_LOAD:     return "load"  + ins.label;
+    case OPCODE_STORE:    return "store" + ins.label;
+
+    case OPCODE_INVALID:
+    case OPCODE_COUNT: 
+        break;
+    };
+    assert(1 && "unknown opcode");
+    return "unreachable opcode";
+}
+
+std::string
+ISet_disasemble(const InstructionSet& iset)
+{
+    std::stringstream ss{};
+    for (auto it : iset) {
+        ss << str(it);
+        ss << "\n";
+    }
+    return ss.str();
+}
+#+end_src
+
+*** Instruction Assemble
+Given a source code file, we need to generate an array of Instructions for our InstructionSet type. This function is defined order to convert the human-readable instruction string into its Opcode format.
+
+#+begin_src c++ :mkdirp yes :tangle src/InstructionSet.hpp
+Opcode
+get_opcode(const std::string& str)
+{
+    /*TODO: Use a map for quicker access*/
+    if (str == "exit")     return OPCODE_EXIT;
+    if (str == "nop")      return OPCODE_NOP;
+    if (str == "swap")     return OPCODE_SWAP;
+    if (str == "put")      return OPCODE_PUT;
+    if (str == "plus")     return OPCODE_PLUS;
+    if (str == "minus")    return OPCODE_MINUS;
+    if (str == "multiply") return OPCODE_MULTIPLY;
+    if (str == "divide")   return OPCODE_DIVIDE;
+    if (str == "dup")      return OPCODE_DUP;
+    if (str == "duplast")  return OPCODE_DUPLAST;
+    if (str == "write")    return OPCODE_WRITE;
+    if (str == "eq")       return OPCODE_EQ;
+    if (str == "cmp")      return OPCODE_CMP;
+    if (str == "label")    return OPCODE_LABEL;
+    if (str == "jmpif")    return OPCODE_JMPIF;
+    if (str == "call")     return OPCODE_CALL;
+    if (str == "var")      return OPCODE_VAR;
+    if (str == "load")     return OPCODE_LOAD;
+    if (str == "store")    return OPCODE_STORE;
+    if (str == "return")   return OPCODE_RETURN;
+    return OPCODE_INVALID;
+}
+#+end_src
+
+We also define a helper function to check if a given instruction string is actually a function.
+#+begin_src c++ :mkdirp yes :tangle src/InstructionSet.hpp  :mkdirp yes
+bool is_opcode(const std::string& str) {
+    if (get_opcode(str) == OPCODE_INVALID)
+        return false;
+    return true;
+}
+#+end_src
+
+#+begin_src c++ :mkdirp yes :tangle src/InstructionSet.hpp
+}//ns
+#+end_src
+
+* Lexing and Tokenization
+
+We need a way to convert source code into our InstructionSet. 
+This is done by Tokenizing the source and using the tokens to assemble our instructions one at a time. 
+
+#+begin_src c++ :mkdirp yes :tangle src/Lexer.hpp
+#pragma once
+
+#include "Defs.hpp"
+#include "InstructionSet.hpp"
+
+namespace LemonVM {
+#+end_src
+
+** Token Definition
+
+We want a consize definition of a token, and we want a way to report back possible errors, such as
+wrong operation, wrong argument etc..
+This is done by also embedding the source line a token is extracted from.
+
+#+begin_src c++ :mkdirp yes :tangle src/Lexer.hpp
+struct Token {
+    std::string str{};
+    std::size_t line{0}; 
+};
+
+using Tokens = std::vector<Token>;
+
+void print_tokens(Tokens tokens) {
+    std::size_t i = 0;
+    for (auto tok: tokens)
+        std::cout << i++ << ") =" << tok.str << "=\n";
+    std::cout << std::endl;
+}
+#+end_src
+
+** Token Extraction
+
+We are given a source file with human-readable source code.
+From this, we can expect a lot of formatting that is irrelevant for the VM to know about.
+Because of this, we strip off all whitespace and extract all the consise tokens one by one. 
+
+Trimming is used in order to iterate the token start pointer across our source, in order to find the next valid token start.
+#+begin_src c++ :mkdirp yes :tangle src/Lexer.hpp
+void trim_left(std::string::iterator& curr, const std::string::iterator eof) {
+    auto is_whitespace = [](char c) { return (c == ' ' || c == '\t'); };
+    auto is_comment    = [](char c) { return (c == '#'); };
+    auto is_endline    = [](char c) { return (c == '\n'); };
+
+    while (curr != eof) {
+        if (is_whitespace(*curr)) {
+            curr++;
+        }
+        else if (is_comment(*curr)) {
+            while (curr != eof && !is_endline(*curr))
+                curr++;
+            curr++;
+            curr++;
+        }
+        else {
+            break;
+        }
+    }
+}
+#+end_src
+
+Once the start of the next token has been found, we need to find the end of the token and extract it. This is done for all possible tokens in the source file.
+
+#+begin_src c++ :mkdirp yes :tangle src/Lexer.hpp
+Token extract_token(std::string::iterator start, const std::string::iterator eof) {
+    auto is_whitespace = [](char c) { return (c == ' ' || c == '\t'); };
+    auto is_comment    = [](char c) { return (c == '#'); };
+    auto is_endline    = [](char c) { return (c == '\n'); };
+
+    std::string::iterator end = start;
+    while (end != eof) {
+        if (is_whitespace(*end) || is_endline(*end) || is_comment(*end))
+            break;
+        end++;
+    }
+    return Token{std::string(start, end), 0};
+}
+
+Tokens tokenize(std::string prg) {
+    Tokens tokens{};
+    std::string::iterator curr = prg.begin();
+    std::string::iterator eof = prg.end();
+    while (curr != eof) {
+        trim_left(curr, eof);
+        if (curr == eof)
+            return tokens;
+        tokens.emplace_back(extract_token(curr, eof));
+        curr += tokens.back().str.size() + 1;
+    }
+    return tokens;
+}
+#+end_src
+
+*** InstructionSet assembly
+
+After extracting all the tokens of the source, we are left with a vector of tokens ready for assembly into a executeable instruction set.
+Some instructions are special in syntax, and is followed by an argument.
+Currently, the only type of argument allowed is an integer, so the assembly function always does string to integer conversion when the opcode requires it.  
+This functionality needs to be extended in the future, when other types are supported by the VM.
+Additionally, in order to support context switching, some opcodes has a label identifier argument, this needs to be saved aswell. 
+#+begin_src c++ :mkdirp yes :tangle src/Lexer.hpp
+InstructionSet assemble(const Tokens& tokens) {
+    InstructionSet iset{};
+    std::size_t i = 0;
+    while (i < tokens.size()) {
+        Instruction ins;
+        ins.opcode = get_opcode(tokens[i].str);
+        if (ins.opcode == OPCODE_PUT || ins.opcode == OPCODE_DUP) {
+            i++;
+            assert(!is_opcode(tokens[i].str));
+            ins.arg1 = std::stoi(tokens[i].str);
+        }
+        else if (ins.opcode == OPCODE_LABEL || ins.opcode == OPCODE_JMPIF ||
+            ins.opcode == OPCODE_CALL) {
+            i++;
+            assert(!is_opcode(tokens[i].str));
+            ins.label = tokens[i].str;
+        }
+        iset.push_back(ins);
+        i++;
+    }
+    return iset;
+}
+
+#+end_src
+
+
+#+begin_src c++ :mkdirp yes :tangle src/Lexer.hpp
+}//ns
+#+end_src
+
+* Evaluation
+
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+#pragma once
+
+#include "InstructionSet.hpp"
+#include "Lexer.hpp"
+
+namespace LemonVM {
+#+end_src
+
+** Typedefs 
+
+We have a large need for buildin data structures for our evaluation context, these makes the purpose clearer when they are used.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+using LabelMap = std::map<std::string, std::size_t>;
+using MemoryStack = std::vector<Arg>;
+using ReturnStack = std::vector<std::size_t>;
+using Scope = std::map<std::string, Arg>;
+using ScopeStack = std::vector<Scope>;
+#+end_src
+
+** VM State & Context
+
+In order to control the evaluation and ensure runtime errors are reported, we need a state.
+This state is an enum class, as opposed to our Opcodes defined earlier, because we do not care
+about the actual value of our state, but rather just needs it for comparison.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+enum class State {
+    ERR,
+    OK,
+    EXIT,
+};
+#+end_src
+
+Our VM Context is the main component of evaluating our bytecode. It is a containerized state of our program under evaluation.
+Since LemonVM is a stack based VM by design, we really only need 3 registers:
+1. [ip] The instruction pointer.
+2. [a] The general purpose register 1.
+3. [b] The general purpose register 2.
+
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+struct VM {
+    std::size_t ip{0};
+    Arg a{0};
+    Arg b{0};
+#+end_src
+
+We also need a place where we can store values our program needs to evaluate based on the bytecode.
+This is handled by the memory stack, and is generally used to store temporary data to be evaluated. 
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    MemoryStack stack{};
+#+end_src
+
+Our VM also has the ability to organize function like jumps, with the ability to be returnable. This is implemented by pushing the current [ip] onto the returnstack, so it can be retrieved on return.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    ReturnStack returnstack{};
+#+end_src
+
+Since our VM is fairly high level for a bytecode compiler, a nice abstraction is created for variables. Variables are also scoped, and managed in the same way as the returnstack when a function jump is made.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    ScopeStack scopestack{};
+};
+#+end_src
+
+In order to inspect the data stack for testing purposes, a print helper is created.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+std::string stack_dump(VM& vm, int width=80) {
+    std::stringstream ss{};
+    ss << "== VM Stack Dump Start ==";
+    for (auto it = vm.stack.cbegin(); it != vm.stack.cend(); it++) {
+        if ((std::distance(vm.stack.cbegin(), it) % width) == 0)
+            ss << "\n";
+        ss << *it;
+    }
+    ss << "\n== VM Stack Dump End ==\n";
+    return ss.str();
+}
+#+end_src
+
+** Evaluation of bytecode
+
+Now we are getting into the real meat of our VM implementation. The specific operation called is defined by the instruction's opcode.
+
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+State ins_eval(VM& vm, const LabelMap& labels, const Instruction& ins)
+{
+    switch (ins.opcode) {
+#+end_src
+
+*** Exit
+For the purpose of completion, we end up with having 2 opcodes that does not lead to a valid operation, due to this, they are simple set to exit evaluation alongside the valid exit opcode.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_COUNT:
+    case OPCODE_INVALID:
+    case OPCODE_EXIT:
+        return State::EXIT;
+#+end_src
+
+*** No Operation
+The opcode LABEL is an artifact from generating the labelmap, and are eccencially considered a garbage operation, this is why it is grouped together with NOP (No OPeration), to simply just continue to next operation.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_LABEL: 
+    case OPCODE_NOP: 
+        break;
+#+end_src
+
+*** Put
+The primary way to store data on the stack, so that it can be used by other operations.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_PUT: 
+        vm.stack.push_back(ins.arg1);
+        break;
+#+end_src
+
+*** Pop
+Remove the top element on the stack.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_POP:
+        vm.a = vm.stack.back();
+        vm.stack.pop_back();
+        break;
+#+end_src
+
+*** Jmp
+Currently jumping unconditionally is not supported.
+
+*** JmpIf
+We want a way to do conditional jumps, used when we want to switch context without creating a new scope.
+This is done by popping the top element and jumping to a label if the popped element is "true".
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_JMPIF:
+        vm.a = vm.stack.back();
+        vm.stack.pop_back();
+        if (vm.a != 0) {
+            vm.ip = labels.at(ins.label);
+            goto CONTEXT_CHANGE;
+        }
+        break;
+#+end_src
+
+*** Call
+Call is the only way to to create a new scope, where we can define new local variables, it also pushes the current [ip] value onto the return stack, so we can return later, providing a real function call interface.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_CALL:
+        vm.returnstack.push_back(vm.ip);
+        vm.ip = labels.at(ins.label);
+        goto CONTEXT_CHANGE;
+#+end_src
+
+*** Return
+Return is called in order to terminate a local context with it's associated local variables, and return from the "CALL" instruction.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_RETURN:
+        if (vm.stack.empty())
+            return State::EXIT;
+        vm.a = vm.returnstack.back();
+        vm.returnstack.pop_back();
+        vm.ip = vm.a;
+        break;
+        goto CONTEXT_CHANGE;
+#+end_src
+
+*** Var
+Var is used to create local variables, the value of the created variable is popped from the stack.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_VAR:
+        vm.scopestack.back().insert({ins.label, 0});
+        break;
+#+end_src
+
+*** Store
+Modify local variable, the new value of the variable is popped from the stack.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_STORE:
+        vm.a = vm.stack.back();
+        vm.stack.pop_back();
+        vm.scopestack.back().insert({ins.label, vm.a});
+        break;
+#+end_src
+
+*** Load
+Local variables cannot be used directly, and act more like a storage space for values. In order to access the variable value, it needs to be pushed onto the stack.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_LOAD:
+        vm.a = vm.scopestack.back().at(ins.label);
+        vm.stack.push_back(vm.a);
+        break;
+#+end_src
+
+*** Equal
+Equality is essencial for programs in order to determine the path of evaluation.
+The operation Equal pops the two top values on the stack, and then pushes the equality result.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_EQ:
+        vm.a = vm.stack.back();
+        vm.stack.pop_back();
+        vm.b = vm.stack.back();
+        vm.stack.pop_back();
+        if (vm.a == vm.b)
+            vm.stack.push_back(1);
+        else
+            vm.stack.push_back(0);
+        break;
+#+end_src
+
+*** Compare
+The operation Compare functions similarly to Equal, but  is designed like the spaceship operator in c++, with the purpose of being able to both do comparison and specify the direction of inequality.
+ This operation can be used as any of:
+1. less-than
+2. greater-than
+3. equal
+4. not-equal
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_CMP:
+        vm.a = vm.stack.back();
+        vm.stack.pop_back();
+        vm.b = vm.stack.back();
+        vm.stack.pop_back();
+        if (vm.b == vm.a)
+            vm.stack.push_back(0);
+        else if (vm.b < vm.a)
+            vm.stack.push_back(1);
+        else
+            vm.stack.push_back(-1);
+        break;
+#+end_src
+
+*** Swap
+Since the stack is quite limited by design, it becomes convenient to be able to swap the two top variables on the stack.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+   case OPCODE_SWAP: 
+        vm.a = vm.stack.back();
+        vm.stack.pop_back();
+        vm.b = vm.stack.back();
+        vm.stack.pop_back();
+        vm.stack.push_back(vm.a);
+        vm.stack.push_back(vm.b);
+        break;
+ #+end_src
+
+*** Arimetrics 
+When doing arimetrics we pop the two top values from the stack, and push back the result.
+In the future, binary operations and more complex arimetrics needs to be supported.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_PLUS: 
+        vm.a = vm.stack.back();
+        vm.stack.pop_back();
+        vm.b = vm.stack.back();
+        vm.stack.pop_back();
+        vm.stack.push_back(vm.b+vm.a);
+        break;
+
+    case OPCODE_MINUS: 
+        vm.a = vm.stack.back();
+        vm.stack.pop_back();
+        vm.b = vm.stack.back();
+        vm.stack.pop_back();
+        vm.stack.push_back(vm.b-vm.a);
+        break;
+
+    case OPCODE_MULTIPLY: 
+        vm.a = vm.stack.back();
+        vm.stack.pop_back();
+        vm.b = vm.stack.back();
+        vm.stack.pop_back();
+        vm.stack.push_back(vm.b*vm.a);
+        break;
+
+    case OPCODE_DIVIDE:
+        vm.a = vm.stack.back();
+        vm.stack.pop_back();
+        vm.b = vm.stack.back();
+        vm.stack.pop_back();
+        vm.stack.push_back(vm.b/vm.a);
+        break;
+ #+end_src
+
+*** Duplication 
+Generating duplicates of stack values are essencial when needing to do multiple operations in a row on the same data.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_DUPLAST:
+        vm.a = vm.stack.back();
+        vm.stack.pop_back();
+        vm.stack.push_back(vm.a);
+        vm.stack.push_back(vm.a);
+        break;
+
+    case OPCODE_DUP:
+        vm.a = vm.stack[ins.arg1];
+        vm.stack.push_back(vm.a);
+        break;
+ #+end_src
+
+*** Write 
+As a bare nessesity of IO, we also support writing of the top stack value.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    case OPCODE_WRITE:
+        vm.a = vm.stack.back();
+        vm.stack.pop_back();
+        printf("[stdout] -> %d\n", vm.a);
+        break;
+ #+end_src
+
+*** Instruction Pointer Manipulation 
+
+The general rule of thumb is that after an operation is evaluated, we increment the instruction pointer by one to get to the next operation. Some operations does however modify the instruction pointer directly, and then uses the context change return instead.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+    };
+    vm.ip++;
+    return State::OK;
+
+ CONTEXT_CHANGE:
+    return State::OK;
+}
+#+end_src
+
+
+** Instruction Set Evaluation
+
+Now that we can evaluate instructions individually, we can fairly easily iterate throught a set of instructions thus evaluating a full program.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+State iset_eval(VM& vm, const LabelMap& labels, InstructionSet& iset) {
+    vm.ip = 0;
+    State state = State::OK; 
+    while (state == State::OK && vm.ip < iset.size())
+        state = ins_eval(vm, labels, iset[vm.ip]);
+    return state;
+}
+#+end_src
+
+** Label Extraction
+
+One pitfall of programming languanges like C/c++ :mkdirp yes is that they require the full program structure to be sequencially defined based on the usage context. In simplified terminology, in order to use a function you need it to be defined earlier in your source so that the program can be read in a single pass. This is not ideal because it means you read the program in reverse, having the most important function definitions at the bottom of your source.
+
+This requirement can be seen as arbitrarily limiting and is entirely unnessecary given modern computing speeds. At the cost of a small amount of evaluation overhead we extract all labels before evaluation. This effectively makes our program double pass.
+
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+LabelMap extract_labels(const InstructionSet& iset) {
+    LabelMap labels{};
+    std::size_t idx = 0;
+    for (auto ins: iset) {
+        if (ins.opcode == OPCODE_LABEL)
+            labels[ins.label] = idx;
+        idx++;
+    }
+    return labels;
+}
+#+end_src
+
+This is also why we could not remove the labels earlier as they are needed now.
+
+** Full Evaluation of a Program
+
+The full evaluation of a program can now be summarized in a single function:
+1. We start off by taking a human-readable program and tokenizing it to strip away all the unneeded stuff like comments and whitespace. 
+2. We assemble the tokens into a instruction set.
+3. Extract all labels in the program.
+4. Evaluate the assembled instruction set.
+
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+State eval(VM& vm, const std::string& program) {
+    Tokens tokens{};
+    InstructionSet iset{};
+    LabelMap labels{};
+    tokens = tokenize(program);
+    iset = assemble(tokens);
+    labels = extract_labels(iset);
+    return iset_eval(vm, labels, iset);
+}
+#+end_src
+
+** File Reading
+
+As a final addition we also have a small helper function to "slurp" an entire file into a string.
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+std::string file_slurp(const std::string& path) {
+    std::ifstream f(path);
+    std::string str{};
+    f.seekg(0, std::ios::end);   
+    str.reserve(f.tellg());
+    f.seekg(0, std::ios::beg);
+    str.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    return str;
+}
+#+end_src
+
+#+begin_src c++ :mkdirp yes :tangle src/Eval.hpp
+}//ns
+#+end_src
+
+
+* Binary Compilation
+
+Ideally, a program should be able to be converted from a human-readable file format into a consise binary format, that is easily loadable without the need for tokenization & lexing in order to execute.
+
+** The expected binary format
+
++------------------------------+--------------+
+| Header Information           | Program      |
++----------+---------+---------+--------------+
+| Password | Version | Size    | Data...      |
++----------+---------+---------+--------------+
+| 2 Bytes  | 1 Byte  | 8 Bytes | <Size> Bytes |
++----------+---------+---------+--------------+
+
+Password: We want a password so that we can determine if a given binary is
+something that might be a executeable.
+
+Version: We need to package a version so that we can distinquish between
+binaries and choose the appropiate evaluation model for each binary, thus giving
+a degree of flexibility with changes.
+
+Size: This is the size of the file, excluding our header data.
+
+Data: The size of a instruction is dependent on the instruction itself.
+Currently, the stack data is designed to contain type information in order to
+simplify interface, at the cost of an extra type-id byte concatenated to the data itself.
+In order to reflect the type in the binary, we prefix a 8 byte id 
+
+packaged to make it type-indifferent number is contained in a single byte, this could
+change and changes to this will be reflected in the version number.
+
+#+begin_src c++ :mkdirp yes :tangle src/Compile.hpp
+#pragma once
+
+#include "Defs.hpp"
+#include "InstructionSet.hpp"
+
+namespace LemonVM {
+
+const std::array<std::uint8_t, 2> binary_password = {25, 01}; /*The net is vast and infinite*/
+
+template<typename T>
+std::size_t stream_bytes(std::vector<std::uint8_t>& stream, const T t) {
+    std::uint8_t* tdata = static_cast<std::uint8_t>(t);
+    std::size_t i;
+    for (i = 0; i < sizeof(T); i++)
+        stream.push_back(tdata[i]);
+    return i;
+}
+
+std::vector<std::uint8_t> generate_bytecode(const InstructionSet& iset) {
+    std::vector<std::uint8_t> stream{};
+    std::size_t i;
+    /*Insert Password*/
+    for (i = 0; i < binary_password.size(); i++)
+        stream_bytes(stream, binary_password[i]);
+
+    /*Insert Version*/
+    stream_bytes(stream, std::uint8_t(1));
+    
+    /*Insert Program Size*/
+    for (i = 0; i < sizeof(std::size_t); i++)
+        stream_bytes(stream, std::uint8_t(0));
+ 
+    /*Insert Program Size*/
+    std::size_t size = 0;
+    for (auto ins: iset) {
+        auto bytecode = instruction_to_bytecode(ins);
+        stream.push_back(bytecode);
+
+    }
+
+    return stream;
+}
+
+}//ns
+#+end_src

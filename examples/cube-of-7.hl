@@ -1,0 +1,16 @@
+call main
+exit
+
+label main
+    put 7
+    call cube
+    duplast
+    write
+    return
+
+label cube
+    duplast
+    duplast
+    multiply
+    multiply
+    return
